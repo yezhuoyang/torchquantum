@@ -37,17 +37,17 @@ class DensityMatrix(nn.Module):
         return torch.trace(self._matrix)
 
     def positive_semidefinite(self):
-        return True
+        """Check whether the matrix is positive semidefinite by Sylvester's_criterion"""
+        return np.all(np.linalg.eigvals(self._matrix) > 0)
 
     def check_valid(self):
         """Check whether the matrix has trace 1 and is positive semidefinite"""
         return self.trace()==1 and self.positive_semidefinite()
 
 
-    
     def spectral(self):
         """Return the spectral of the DensityMatrix"""
-        return
+        return list(np.linalg.eigvals(self._matrix))
 
 
     def tensor(self,other):
@@ -55,7 +55,8 @@ class DensityMatrix(nn.Module):
         Args:
             other (DensityMatrix: Another density matrix
         """
-        return 
+        self._matrix=torch.kron(self._matrix,other._matrix)
+
 
 
     def expand(self,other):
@@ -63,7 +64,7 @@ class DensityMatrix(nn.Module):
         Args:
             other (DensityMatrix: Another density matrix
         """
-        return 
+        self._matrix=torch.kron(other._matrix,self._matrix)
 
 
 
@@ -91,10 +92,13 @@ class DensityMatrix(nn.Module):
              states:List of state.
            For example:
              probs:[0.5,0.5],states:[|00>,|11>]
-           Then the corresponding matrix is:
-
+           Then the corresponding matrix is: 0.5|00><00|+0.5|11><11|
+            0.5, 0, 0, 0
+            0  , 0, 0, 0
+            0  , 0, 0, 0
+            0 ,  0, 0, 0.5 
+            self._matrix[00][00]=self._matrix[11][11]=0.5
         """
-
         return
 
 
@@ -123,15 +127,19 @@ class DensityMatrix(nn.Module):
 
 
     def purity(self):
-        """Calculate the purity of the DensityMatrix
+        """Calculate the purity of the DensityMatrix defined as \gamma=tr(\rho^2)
         """
-        return 1
+        return torch.trace(torch.matmul(self._matrix, self._matrix))
 
 
     def partial_trace(self,dims:List[int]):
         """Calculate the partial trace of given sub-dimension, return a new density_matrix
         Args:
             dims:The list of sub-dimension
+            For example, If we have 3 qubit, the matrix shape is (8,8),
+            We want to do partial trace to qubit 0,2, dims=[0,2].
+            First, the matrix should be reshped to (2,2,2,2,2,2)
+            then we call  np.einsum('ijkiqk->jq', reshaped_dm)
         """
         return False
 
