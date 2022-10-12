@@ -23,20 +23,31 @@ class DensityMatrix(nn.Module):
         """
         For example, when n_wires=3
         matrix[001110] denotes the index of |001><110|
+        Set Initial value the density matrix of the pure state |00...00>
+
         """
         _matrix = torch.zeros(2 ** (2*self.n_wires), dtype=C_DTYPE)
-        _matrix = torch.reshape(_matrix, [2] * (2*self.n_wires))
-
-    def check_valid(self):
-        """Check whether the matrix has trace 1 and is positive semidefinite"""
+        _matrix[0] = 1 + 0j
+        _matrix = torch.reshape(_matrix, [2*self.n_wires]*2)
 
 
-        return False
 
     def trace(self):
         """Return the trace of the DensityMatrix"""
+        return torch.trace(self._matrix)
 
-        return 
+    def positive_semidefinite(self):
+        return True
+
+    def check_valid(self):
+        """Check whether the matrix has trace 1 and is positive semidefinite"""
+        return self.trace()==1 and self.positive_semidefinite()
+
+
+    
+    def spectral(self):
+        """Return the spectral of the DensityMatrix"""
+        return
 
 
     def tensor(self,other):
@@ -106,14 +117,17 @@ class DensityMatrix(nn.Module):
         Args:
             other (complex): a complex number.
         """
-        if not isinstance(other, Number):
-            raise("other is not a number")
         ret = copy.copy(self)
-        ret._data = other * self.data
+        ret._matrix = other * self._matrix
         return ret
 
 
-    
+    def purity(self):
+        """Calculate the purity of the DensityMatrix
+        """
+        return 1
+
+
     def partial_trace(self,dims:List[int]):
         """Calculate the partial trace of given sub-dimension, return a new density_matrix
         Args:
