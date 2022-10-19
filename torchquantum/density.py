@@ -3,14 +3,227 @@ import torch
 import torch.nn as nn
 import numpy as np
 import torchquantum.functional as tqf
+import torchquantum as tq
 import copy
 from torchquantum.states import QuantumState
-
-from torchquantum.macro import C_DTYPE
+from torchquantum.macro import C_DTYPE, ABC, ABC_ARRAY, INV_SQRT2
 from typing import Union, List, Iterable
 
 
 __all__ = ['DensityMatrix']
+
+
+mat_dict = {
+    'hadamard': torch.tensor([[INV_SQRT2, INV_SQRT2], [INV_SQRT2, -INV_SQRT2]],
+                             dtype=C_DTYPE),
+    'shadamard': torch.tensor([[np.cos(np.pi / 8), -np.sin(np.pi / 8)],
+                               [np.sin(np.pi / 8), np.cos(np.pi / 8)]],
+                              dtype=C_DTYPE),
+    'paulix': torch.tensor([[0, 1], [1, 0]], dtype=C_DTYPE),
+    'pauliy': torch.tensor([[0, -1j], [1j, 0]], dtype=C_DTYPE),
+    'pauliz': torch.tensor([[1, 0], [0, -1]], dtype=C_DTYPE),
+    'i': torch.tensor([[1, 0], [0, 1]], dtype=C_DTYPE),
+    's': torch.tensor([[1, 0], [0, 1j]], dtype=C_DTYPE),
+    't': torch.tensor([[1, 0], [0, np.exp(1j * np.pi / 4)]], dtype=C_DTYPE),
+    'sx': 0.5 * torch.tensor([[1 + 1j, 1 - 1j], [1 - 1j, 1 + 1j]],
+                             dtype=C_DTYPE),
+    'cnot': torch.tensor([[1, 0, 0, 0],
+                          [0, 1, 0, 0],
+                          [0, 0, 0, 1],
+                          [0, 0, 1, 0]], dtype=C_DTYPE),
+    'cz': torch.tensor([[1, 0, 0, 0],
+                        [0, 1, 0, 0],
+                        [0, 0, 1, 0],
+                        [0, 0, 0, -1]], dtype=C_DTYPE),
+    'cy': torch.tensor([[1, 0, 0, 0],
+                        [0, 1, 0, 0],
+                        [0, 0, 0, -1j],
+                        [0, 0, 1j, 0]], dtype=C_DTYPE),
+    'swap': torch.tensor([[1, 0, 0, 0],
+                          [0, 0, 1, 0],
+                          [0, 1, 0, 0],
+                          [0, 0, 0, 1]], dtype=C_DTYPE),
+    'sswap': torch.tensor([[1, 0, 0, 0],
+                           [0, (1 + 1j) / 2, (1 - 1j) / 2, 0],
+                           [0, (1 - 1j) / 2, (1 + 1j) / 2, 0],
+                           [0, 0, 0, 1]], dtype=C_DTYPE),
+    'cswap': torch.tensor([[1, 0, 0, 0, 0, 0, 0, 0],
+                           [0, 1, 0, 0, 0, 0, 0, 0],
+                           [0, 0, 1, 0, 0, 0, 0, 0],
+                           [0, 0, 0, 1, 0, 0, 0, 0],
+                           [0, 0, 0, 0, 1, 0, 0, 0],
+                           [0, 0, 0, 0, 0, 0, 1, 0],
+                           [0, 0, 0, 0, 0, 1, 0, 0],
+                           [0, 0, 0, 0, 0, 0, 0, 1]], dtype=C_DTYPE),
+    'toffoli': torch.tensor([[1, 0, 0, 0, 0, 0, 0, 0],
+                             [0, 1, 0, 0, 0, 0, 0, 0],
+                             [0, 0, 1, 0, 0, 0, 0, 0],
+                             [0, 0, 0, 1, 0, 0, 0, 0],
+                             [0, 0, 0, 0, 1, 0, 0, 0],
+                             [0, 0, 0, 0, 0, 1, 0, 0],
+                             [0, 0, 0, 0, 0, 0, 0, 1],
+                             [0, 0, 0, 0, 0, 0, 1, 0]], dtype=C_DTYPE)
+}
+
+def Dhadamard(q_device: tq.QuantumDevice,
+             wires: Union[List[int], int],
+             params: torch.Tensor = None,
+             n_wires: int = None,
+             static: bool = False,
+             parent_graph = None,
+             inverse: bool = False,
+             comp_method: str = 'bmm'):
+    name = 'hadamard'
+    mat = mat_dict[name]
+    density = q_device.matrix
+    q_device.matrix = apply_unitary_density_einsum(density, mat, wires)
+    #q_device.matrix = apply_unitary_density_bmm(density, mat, wires)
+    return
+
+
+def apply_unitary_density_einsum(state, mat, wires):
+    """Apply the unitary to the statevector using torch.einsum method.
+
+    Args:
+        state (torch.Tensor): The statevector.
+        mat (torch.Tensor): The unitary matrix of the operation.
+        wires (int or List[int]): Which qubit the operation is applied to.
+
+    Returns:
+        torch.Tensor: The new statevector.
+
+    """
+    device_wires = wires
+
+    # minus one because of batch
+    total_wires = len(state.shape) - 1
+
+    if len(mat.shape) > 2:
+        is_batch_unitary = True
+        bsz = mat.shape[0]
+        shape_extension = [bsz]
+        # try:
+        #     assert state.shape[0] == bsz
+        # except AssertionError as err:
+        #     logger.exception(f"Batch size of Quantum Device must be the same"
+        #                      f" with that of gate unitary matrix")
+        #     raise err
+
+    else:
+        is_batch_unitary = False
+        shape_extension = []
+
+    mat = mat.view(shape_extension + [2] * len(device_wires) * 2)
+
+    mat = mat.type(C_DTYPE).to(state.device)
+
+    # Tensor indices of the quantum state
+    state_indices = ABC[: total_wires]
+
+    # Indices of the quantum state affected by this operation
+    affected_indices = "".join(ABC_ARRAY[list(device_wires)].tolist())
+
+    # All affected indices will be summed over, so we need the same number
+    # of new indices
+    new_indices = ABC[total_wires: total_wires + len(device_wires)]
+
+    # The new indices of the state are given by the old ones with the
+    # affected indices replaced by the new_indices
+    new_state_indices = functools.reduce(
+        lambda old_string, idx_pair: old_string.replace(idx_pair[0],
+                                                        idx_pair[1]),
+        zip(affected_indices, new_indices),
+        state_indices,
+    )
+
+    # try:
+    #     cannot support too many qubits...
+    #     assert ABC[-1] not in state_indices + new_state_indices  \
+    #      + new_indices + affected_indices
+    # except AssertionError as err:
+    #     logger.exception(f"Cannot support too many qubit.")
+    #     raise err
+
+    state_indices = ABC[-1] + state_indices
+    new_state_indices = ABC[-1] + new_state_indices
+    if is_batch_unitary:
+        new_indices = ABC[-1] + new_indices
+
+    # We now put together the indices in the notation numpy einsum
+    # requires
+    einsum_indices = f"{new_indices}{affected_indices}," \
+                     f"{state_indices}->{new_state_indices}"
+
+    new_state = torch.einsum(einsum_indices, mat, state)
+
+    return new_state
+
+
+
+def apply_unitary_density_bmm(density, mat, wires):
+    """Apply the unitary to the DensityMatrix using torch.bmm method.
+
+        Args:
+            state (torch.Tensor): The statevector.
+            mat (torch.Tensor): The unitary matrix of the operation.
+            wires (int or List[int]): Which qubit the operation is applied to.
+
+        Returns:
+            torch.Tensor: The new statevector.
+        """
+    device_wires = wires
+    n_qubit=int((density.dim()-1)/2)
+
+    mat = mat.type(C_DTYPE).to(density.device)
+    """
+    Compute U \rho
+    """
+    devices_dims = [w + 1 for w in device_wires]
+    permute_to = list(range(density.dim()))
+    for d in sorted(devices_dims, reverse=True):
+        del permute_to[d]
+    permute_to = permute_to[:1] + devices_dims + permute_to[1:]
+    permute_back = list(np.argsort(permute_to))
+    original_shape = density.shape
+    permuted = density.permute(permute_to).reshape(
+        [original_shape[0], mat.shape[-1], -1])
+    if len(mat.shape) > 2:
+        # both matrix and state are in batch mode
+        new_density = mat.bmm(permuted)
+    else:
+        # matrix no batch, state in batch mode
+        bsz = permuted.shape[0]
+        expand_shape = [bsz] + list(mat.shape)
+        new_density = mat.expand(expand_shape).bmm(permuted)
+    new_density = new_density.view(original_shape).permute(permute_back)
+    """
+    Compute U*rho*U^\dagger
+    """
+    devices_dims = [w + 1 + n_qubit for w in device_wires]
+    permute_to = list(range(density.dim()))
+    for d in sorted(devices_dims, reverse=True):
+        del permute_to[d]
+    permute_to = permute_to + devices_dims 
+    permute_back = list(np.argsort(permute_to))
+    original_shape = density.shape
+    permuted = new_density.permute(permute_to).reshape(
+        [original_shape[0], -1,mat.shape[-1]])
+    if len(mat.shape) > 2:
+        # both matrix and state are in batch mode
+        # matdag is the dagger of mat
+        matdag=torch.conj(mat.permute([0,2,1]))
+        new_density = permuted.bmm(matdag)
+    else:
+        # matrix no batch, state in batch mode
+        matdag=torch.conj(mat.permute([1,0]))
+        bsz = permuted.shape[0]
+        expand_shape = [bsz] + list(matdag.shape)
+        new_density = permuted.bmm(matdag.expand(expand_shape))
+    new_density = new_density.view(original_shape).permute(permute_back)
+    return new_density
+
+
+
 
 class DensityMatrix(nn.Module):
 
@@ -30,7 +243,7 @@ class DensityMatrix(nn.Module):
         """
         _matrix = torch.zeros(2 ** (2*self.n_wires), dtype=C_DTYPE)
         _matrix[0] = 1 + 0j
-        _matrix = torch.reshape(_matrix, [2**self.n_wires,2**self.n_wires])
+        _matrix = torch.reshape(_matrix, [2]*(2*self.n_wires))
         self.register_buffer('matrix', _matrix)
 
 
@@ -161,7 +374,6 @@ class DensityMatrix(nn.Module):
 
 
 
-
     def matrix_from_1_qubit_gate(self,gate:torch.tensor,wire):
         """Get the matrix form of a gate on a single qubit on this density matrix.         
             gate is a 2*2 tensor
@@ -175,7 +387,6 @@ class DensityMatrix(nn.Module):
         In binray form, |index>=|101...wire ..0101>
         We only need to calculate the non-zero element of  G|wire><wire|GT
         """
-        
         for k in range(0,2**(2*self.n_wires)):
             print("k",k)
             print(bin(k))
@@ -240,10 +451,12 @@ class DensityMatrix(nn.Module):
         """Evolve the density matrix in batchmode         
            operator has size [2**(2*self.n_wires),2**(2*self.n_wires)]           
         """      
-        """Convert the matrix to vector of shape [bsz,2**(2*self.n_wires)]                  
+        """Convert the matrix to vector of shape [bsz,2**(2*self.n_wires)]  
+           Return U rho U^\dagger                
         """  
         bsz = self.matrix.shape[0]
         expand_shape = [bsz] + list(operator.shape)
+        
         new_matrix = operator.expand(expand_shape).bmm(torch.reshape(self.matrix,[bsz,2**(2*self.n_wires)]))
         self.matrix=torch.reshape(new_matrix,[bsz,2**self.n_wires,2**self.n_wires])
 
@@ -334,153 +547,148 @@ class DensityMatrix(nn.Module):
                 wires: Union[List[int], int],
                 inverse: bool = False,
                 comp_method: str = 'bmm'):
-        if(self._calc_by_states):
-            
-
-            tqf.hadamard(self,
+            Dhadamard(self,
                             wires=wires,
                             inverse=inverse,
-                            comp_method=comp_method)
-        else:   
-            return                    
+                            comp_method=comp_method)             
 
 
 
 
     def shadamard(self,
-                  wires: Union[List[int], int],
-                  inverse: bool = False,
-                  comp_method: str = 'bmm'):
-        tqf.shadamard(self,
-                      wires=wires,
-                      inverse=inverse,
-                      comp_method=comp_method)
+                    wires: Union[List[int], int],
+                    inverse: bool = False,
+                    comp_method: str = 'bmm'):
+            tqf.shadamard(self,
+                        wires=wires,
+                        inverse=inverse,
+                        comp_method=comp_method)
 
     def paulix(self,
-               wires: Union[List[int], int],
-               inverse: bool = False,
-               comp_method: str = 'bmm'):
+            wires: Union[List[int], int],
+            inverse: bool = False,
+            comp_method: str = 'bmm'):
         tqf.paulix(self,
-                   wires=wires,
-                   inverse=inverse,
-                   comp_method=comp_method)
+                wires=wires,
+                inverse=inverse,
+                comp_method=comp_method)
 
     def pauliy(self,
-               wires: Union[List[int], int],
-               inverse: bool = False,
-               comp_method: str = 'bmm'):
+            wires: Union[List[int], int],
+            inverse: bool = False,
+            comp_method: str = 'bmm'):
         tqf.pauliy(self,
-                   wires=wires,
-                   inverse=inverse,
-                   comp_method=comp_method)
+                wires=wires,
+                inverse=inverse,
+                comp_method=comp_method)
 
     def pauliz(self,
-               wires: Union[List[int], int],
-               inverse: bool = False,
-               comp_method: str = 'bmm'):
+            wires: Union[List[int], int],
+            inverse: bool = False,
+            comp_method: str = 'bmm'):
         tqf.pauliz(self,
-                   wires=wires,
-                   inverse=inverse,
-                   comp_method=comp_method)
+                wires=wires,
+                inverse=inverse,
+                comp_method=comp_method)
 
     def i(self,
-          wires: Union[List[int], int],
-          inverse: bool = False,
-          comp_method: str = 'bmm'):
+        wires: Union[List[int], int],
+        inverse: bool = False,
+        comp_method: str = 'bmm'):
         tqf.i(self,
-              wires=wires,
-              inverse=inverse,
-              comp_method=comp_method)
+            wires=wires,
+            inverse=inverse,
+            comp_method=comp_method)
 
     def s(self,
-          wires: Union[List[int], int],
-          inverse: bool = False,
-          comp_method: str = 'bmm'):
+        wires: Union[List[int], int],
+        inverse: bool = False,
+        comp_method: str = 'bmm'):
         tqf.s(self,
-              wires=wires,
-              inverse=inverse,
-              comp_method=comp_method)
+            wires=wires,
+            inverse=inverse,
+            comp_method=comp_method)
 
     def t(self,
-          wires: Union[List[int], int],
-          inverse: bool = False,
-          comp_method: str = 'bmm'):
+        wires: Union[List[int], int],
+        inverse: bool = False,
+        comp_method: str = 'bmm'):
         tqf.t(self,
-              wires=wires,
-              inverse=inverse,
-              comp_method=comp_method)
+            wires=wires,
+            inverse=inverse,
+            comp_method=comp_method)
 
     def sx(self,
-           wires: Union[List[int], int],
-           inverse: bool = False,
-           comp_method: str = 'bmm'):
+        wires: Union[List[int], int],
+        inverse: bool = False,
+        comp_method: str = 'bmm'):
         tqf.sx(self,
-               wires=wires,
-               inverse=inverse,
-               comp_method=comp_method)
+            wires=wires,
+            inverse=inverse,
+            comp_method=comp_method)
 
     def cnot(self,
-             wires: Union[List[int], int],
-             inverse: bool = False,
-             comp_method: str = 'bmm'):
+            wires: Union[List[int], int],
+            inverse: bool = False,
+            comp_method: str = 'bmm'):
         tqf.cnot(self,
-                 wires=wires,
-                 inverse=inverse,
-                 comp_method=comp_method)
+                wires=wires,
+                inverse=inverse,
+                comp_method=comp_method)
 
     def cz(self,
-           wires: Union[List[int], int],
-           inverse: bool = False,
-           comp_method: str = 'bmm'):
+        wires: Union[List[int], int],
+        inverse: bool = False,
+        comp_method: str = 'bmm'):
         tqf.cz(self,
-               wires=wires,
-               inverse=inverse,
-               comp_method=comp_method)
+            wires=wires,
+            inverse=inverse,
+            comp_method=comp_method)
 
     def cy(self,
-           wires: Union[List[int], int],
-           inverse: bool = False,
-           comp_method: str = 'bmm'):
+        wires: Union[List[int], int],
+        inverse: bool = False,
+        comp_method: str = 'bmm'):
         tqf.cy(self,
-               wires=wires,
-               inverse=inverse,
-               comp_method=comp_method)
+            wires=wires,
+            inverse=inverse,
+            comp_method=comp_method)
 
     def swap(self,
-             wires: Union[List[int], int],
-             inverse: bool = False,
-             comp_method: str = 'bmm'):
+            wires: Union[List[int], int],
+            inverse: bool = False,
+            comp_method: str = 'bmm'):
         tqf.swap(self,
-                 wires=wires,
-                 inverse=inverse,
-                 comp_method=comp_method)
+                wires=wires,
+                inverse=inverse,
+                comp_method=comp_method)
 
     def sswap(self,
-              wires: Union[List[int], int],
-              inverse: bool = False,
-              comp_method: str = 'bmm'):
+            wires: Union[List[int], int],
+            inverse: bool = False,
+            comp_method: str = 'bmm'):
         tqf.sswap(self,
-                  wires=wires,
-                  inverse=inverse,
-                  comp_method=comp_method)
+                wires=wires,
+                inverse=inverse,
+                comp_method=comp_method)
 
     def cswap(self,
-              wires: Union[List[int], int],
-              inverse: bool = False,
-              comp_method: str = 'bmm'):
+            wires: Union[List[int], int],
+            inverse: bool = False,
+            comp_method: str = 'bmm'):
         tqf.cswap(self,
-                  wires=wires,
-                  inverse=inverse,
-                  comp_method=comp_method)
+                wires=wires,
+                inverse=inverse,
+                comp_method=comp_method)
 
     def toffoli(self,
-                 wires: Union[List[int], int],
-                 inverse: bool = False,
-                 comp_method: str = 'bmm'):
+                wires: Union[List[int], int],
+                inverse: bool = False,
+                comp_method: str = 'bmm'):
         tqf.toffoli(self,
-                     wires=wires,
-                     inverse=inverse,
-                     comp_method=comp_method)
+                    wires=wires,
+                    inverse=inverse,
+                    comp_method=comp_method)
 
     def multicnot(self,
                 wires: Union[List[int], int],
@@ -503,10 +711,10 @@ class DensityMatrix(nn.Module):
                     comp_method=comp_method)
 
     def rx(self,
-           wires: Union[List[int], int],
-           params: Union[torch.Tensor, np.ndarray, List[float], List[int], int, float],
-           inverse: bool = False,
-           comp_method: str = 'bmm'):
+        wires: Union[List[int], int],
+        params: Union[torch.Tensor, np.ndarray, List[float], List[int], int, float],
+        inverse: bool = False,
+        comp_method: str = 'bmm'):
 
         if isinstance(params, Iterable):
             params = torch.Tensor(params)
@@ -514,16 +722,16 @@ class DensityMatrix(nn.Module):
             params = torch.Tensor([params])
 
         tqf.rx(self,
-               wires=wires,
-               params=params,
-               inverse=inverse,
-               comp_method=comp_method)
+            wires=wires,
+            params=params,
+            inverse=inverse,
+            comp_method=comp_method)
 
     def ry(self,
-           wires: Union[List[int], int],
-           params: torch.Tensor,
-           inverse: bool = False,
-           comp_method: str = 'bmm'):
+        wires: Union[List[int], int],
+        params: torch.Tensor,
+        inverse: bool = False,
+        comp_method: str = 'bmm'):
 
         if isinstance(params, Iterable):
             params = torch.Tensor(params)
@@ -531,16 +739,16 @@ class DensityMatrix(nn.Module):
             params = torch.Tensor([params])
 
         tqf.ry(self,
-               wires=wires,
-               params=params,
-               inverse=inverse,
-               comp_method=comp_method)
+            wires=wires,
+            params=params,
+            inverse=inverse,
+            comp_method=comp_method)
 
     def rz(self,
-           wires: Union[List[int], int],
-           params: torch.Tensor,
-           inverse: bool = False,
-           comp_method: str = 'bmm'):
+        wires: Union[List[int], int],
+        params: torch.Tensor,
+        inverse: bool = False,
+        comp_method: str = 'bmm'):
 
         if isinstance(params, Iterable):
             params = torch.Tensor(params)
@@ -548,10 +756,10 @@ class DensityMatrix(nn.Module):
             params = torch.Tensor([params])
 
         tqf.rz(self,
-               wires=wires,
-               params=params,
-               inverse=inverse,
-               comp_method=comp_method)
+            wires=wires,
+            params=params,
+            inverse=inverse,
+            comp_method=comp_method)
 
     def rxx(self,
             wires: Union[List[int], int],
@@ -622,10 +830,10 @@ class DensityMatrix(nn.Module):
                 comp_method=comp_method)
 
     def phaseshift(self,
-                   wires: Union[List[int], int],
-                   params: Union[torch.Tensor, np.ndarray, List[float], List[int], int, float],
-                   inverse: bool = False,
-                   comp_method: str = 'bmm'):
+                wires: Union[List[int], int],
+                params: Union[torch.Tensor, np.ndarray, List[float], List[int], int, float],
+                inverse: bool = False,
+                comp_method: str = 'bmm'):
 
         if isinstance(params, Iterable):
             params = torch.Tensor(params)
@@ -633,10 +841,10 @@ class DensityMatrix(nn.Module):
             params = torch.Tensor([params])
 
         tqf.phaseshift(self,
-                       wires=wires,
-                       params=params,
-                       inverse=inverse,
-                       comp_method=comp_method)
+                    wires=wires,
+                    params=params,
+                    inverse=inverse,
+                    comp_method=comp_method)
 
     def rot(self,
             wires: Union[List[int], int],
@@ -948,5 +1156,4 @@ class DensityMatrix(nn.Module):
     p = phaseshift
     cp = cu1
     cr = cu1
-    cphase = cu   
-    
+    cphase = cu
